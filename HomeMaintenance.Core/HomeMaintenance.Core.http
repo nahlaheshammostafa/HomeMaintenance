@@ -1,6 +1,0 @@
-@HomeMaintenance.Core_HostAddress = http://localhost:5190
-
-GET {{HomeMaintenance.Core_HostAddress}}/weatherforecast/
-Accept: application/json
-
-###
