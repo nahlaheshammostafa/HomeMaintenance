@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="HomeMaintenance.Api/HomeMaintenance.Api.csproj" />
+  <Project Path="HomeMaintenance.Core/HomeMaintenance.Core.csproj" />
+  <Project Path="HomeMaintenance.Domain/HomeMaintenance.Domain.csproj" />
+  <Project Path="HomeMaintenance.Infrastructure/HomeMaintenance.Infrastructure.csproj" />
+</Solution>
