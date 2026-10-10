@@ -1,0 +1,719 @@
+Here is the complete code for the **`Bookings`** slice. 
+
+This is the crowning achievement of the backend. It brings together the **Technician Assignment Engine**, the **State Machine**, the **Rejection Reassignment Loop**, and the **24-hour Cancellation Policy**.
+
+---
+
+### 1. The Technician Assignment Engine
+
+#### A. Contract (`Bookings/Contracts/ITechnicianAssignmentEngine.cs`)
+```csharp
+namespace HomeMaintenance.Application.Bookings.Contracts;
+
+using HomeMaintenance.Core.Results;
+using HomeMaintenance.Domain.Entities;
+
+public interface ITechnicianAssignmentEngine
+{
+    /// <summary>
+    /// Searches for eligible technicians satisfying all 6 availability constraints
+    /// and selects one using the random selection strategy.
+    /// </summary>
+    Task<Result<Technician>> SelectTechnicianAsync(
+        Guid serviceId,
+        Guid serviceAreaId,
+        DateTime startUtc,
+        DateTime endUtc,
+        Guid? bookingId = null,
+        CancellationToken cancellationToken = default);
+}
+```
+
+#### B. Implementation (`Bookings/Services/TechnicianAssignmentEngine.cs`)
+```csharp
+namespace HomeMaintenance.Application.Bookings.Services;
+
+using HomeMaintenance.Application.Bookings.Contracts;
+using HomeMaintenance.Core.Results;
+using HomeMaintenance.Domain.Entities;
+using HomeMaintenance.Domain.Repositories;
+
+public class TechnicianAssignmentEngine : ITechnicianAssignmentEngine
+{
+    private readonly ITechnicianRepository _technicianRepository;
+
+    public TechnicianAssignmentEngine(ITechnicianRepository technicianRepository)
+    {
+        _technicianRepository = technicianRepository;
+    }
+
+    public async Task<Result<Technician>> SelectTechnicianAsync(
+        Guid serviceId,
+        Guid serviceAreaId,
+        DateTime startUtc,
+        DateTime endUtc,
+        Guid? bookingId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var dayOfWeek = startUtc.DayOfWeek;
+        var startTime = TimeOnly.FromDateTime(startUtc);
+        var endTime = TimeOnly.FromDateTime(endUtc);
+
+        // 1. Query database for all technicians matching all 6 eligibility rules
+        var eligibleTechnicians = await _technicianRepository.GetEligibleTechniciansAsync(
+            serviceId,
+            serviceAreaId,
+            dayOfWeek,
+            startTime,
+            endTime,
+            startUtc,
+            endUtc,
+            bookingId,
+            cancellationToken);
+
+        // 2. Case 05 from PDF: No technicians available
+        if (eligibleTechnicians.Count == 0)
+        {
+            return Error.NotFound(
+                "Technician.NoneAvailable",
+                "Sorry, no available technicians found matching the requested service, area, and time.");
+        }
+
+        // 3. Random Selection Strategy (Rule from PDF page 10)
+        if (eligibleTechnicians.Count == 1)
+        {
+            return eligibleTechnicians[0];
+        }
+
+        int randomIndex = Random.Shared.Next(eligibleTechnicians.Count);
+        return eligibleTechnicians[randomIndex];
+    }
+}
+```
+
+---
+
+### 2. DTOs (`Bookings/Dtos/`)
+
+#### A. `BookingDto.cs` (Detailed Response Model)
+```csharp
+namespace HomeMaintenance.Application.Bookings.Dtos;
+
+using HomeMaintenance.Domain.Enums;
+
+public class BookingDto
+{
+    public Guid Id { get; set; }
+    public Guid CustomerId { get; set; }
+    public string CustomerName { get; set; } = string.Empty;
+    public Guid ServiceId { get; set; }
+    public string ServiceName { get; set; } = string.Empty;
+    public DateTime StartTimeUtc { get; set; }
+    public DateTime EndTimeUtc { get; set; }
+    public BookingStatus Status { get; set; }
+    public string Location { get; set; } = string.Empty;
+    public string? CancellationReason { get; set; }
+    public DateTime CreatedAtUtc { get; set; }
+
+    public List<BookingAssignmentDto> Assignments { get; set; } = new();
+    public List<BookingStatusHistoryDto> StatusHistories { get; set; } = new();
+}
+
+public class BookingAssignmentDto
+{
+    public Guid Id { get; set; }
+    public Guid TechnicianId { get; set; }
+    public string TechnicianName { get; set; } = string.Empty;
+    public AssignmentStatus Status { get; set; }
+    public DateTime AssignedAtUtc { get; set; }
+    public DateTime? RespondedAtUtc { get; set; }
+}
+
+public class BookingStatusHistoryDto
+{
+    public Guid Id { get; set; }
+    public BookingStatus Status { get; set; }
+    public DateTime ChangedAtUtc { get; set; }
+    public string? Reason { get; set; }
+}
+```
+
+#### B. Request DTOs
+```csharp
+namespace HomeMaintenance.Application.Bookings.Dtos;
+
+public class CreateBookingRequestDto
+{
+    public Guid CustomerId { get; set; }
+    public Guid ServiceId { get; set; }
+    public Guid ServiceAreaId { get; set; }
+    public DateTime StartTimeUtc { get; set; }
+    public string Location { get; set; } = string.Empty;
+}
+
+public class CancelBookingRequestDto
+{
+    public string Reason { get; set; } = string.Empty;
+}
+
+public class RescheduleBookingRequestDto
+{
+    public Guid ServiceAreaId { get; set; }
+    public DateTime NewStartTimeUtc { get; set; }
+}
+```
+
+---
+
+### 3. Validation (`Bookings/Validations/BookingValidators.cs`)
+
+```csharp
+namespace HomeMaintenance.Application.Bookings.Validations;
+
+using FluentValidation;
+using HomeMaintenance.Application.Bookings.Dtos;
+
+public class CreateBookingValidator : AbstractValidator<CreateBookingRequestDto>
+{
+    public CreateBookingValidator()
+    {
+        RuleFor(x => x.CustomerId).NotEmpty().WithMessage("Customer ID is required.");
+        RuleFor(x => x.ServiceId).NotEmpty().WithMessage("Service ID is required.");
+        RuleFor(x => x.ServiceAreaId).NotEmpty().WithMessage("Service Area ID is required.");
+
+        // Rule 24: A booking cannot start in the past
+        RuleFor(x => x.StartTimeUtc)
+            .GreaterThan(DateTime.UtcNow)
+            .WithMessage("Booking start time must be in the future.");
+
+        RuleFor(x => x.Location)
+            .NotEmpty().WithMessage("Service location is required.")
+            .MaximumLength(500).WithMessage("Location cannot exceed 500 characters.");
+    }
+}
+
+public class CancelBookingValidator : AbstractValidator<CancelBookingRequestDto>
+{
+    public CancelBookingValidator()
+    {
+        RuleFor(x => x.Reason)
+            .NotEmpty().WithMessage("Cancellation reason is required.")
+            .MaximumLength(500).WithMessage("Reason cannot exceed 500 characters.");
+    }
+}
+
+public class RescheduleBookingValidator : AbstractValidator<RescheduleBookingRequestDto>
+{
+    public RescheduleBookingValidator()
+    {
+        RuleFor(x => x.ServiceAreaId).NotEmpty().WithMessage("Service Area ID is required.");
+
+        RuleFor(x => x.NewStartTimeUtc)
+            .GreaterThan(DateTime.UtcNow)
+            .WithMessage("New booking start time must be in the future.");
+    }
+}
+```
+
+---
+
+### 4. Mapping (`Bookings/Mapping/BookingMappingProfile.cs`)
+
+```csharp
+namespace HomeMaintenance.Application.Bookings.Mapping;
+
+using HomeMaintenance.Application.Bookings.Dtos;
+using HomeMaintenance.Domain.Entities;
+
+public static class BookingMappingProfile
+{
+    public static BookingDto ToDto(this Booking entity) =>
+        new()
+        {
+            Id = entity.Id,
+            CustomerId = entity.CustomerId,
+            CustomerName = entity.Customer?.Name ?? string.Empty,
+            ServiceId = entity.ServiceId,
+            ServiceName = entity.Service?.Name ?? string.Empty,
+            StartTimeUtc = entity.StartTimeUtc,
+            EndTimeUtc = entity.EndTimeUtc,
+            Status = entity.Status,
+            Location = entity.Location,
+            CancellationReason = entity.CancellationReason,
+            CreatedAtUtc = entity.CreatedAtUtc,
+            Assignments = entity.BookingAssignments
+                .Select(ba => new BookingAssignmentDto
+                {
+                    Id = ba.Id,
+                    TechnicianId = ba.TechnicianId,
+                    TechnicianName = ba.Technician?.Name ?? string.Empty,
+                    Status = ba.Status,
+                    AssignedAtUtc = ba.AssignedAtUtc,
+                    RespondedAtUtc = ba.RespondedAtUtc
+                })
+                .ToList(),
+            StatusHistories = entity.BookingStatusHistories
+                .OrderByDescending(sh => sh.ChangedAtUtc)
+                .Select(sh => new BookingStatusHistoryDto
+                {
+                    Id = sh.Id,
+                    Status = sh.Status,
+                    ChangedAtUtc = sh.ChangedAtUtc,
+                    Reason = sh.Reason
+                })
+                .ToList()
+        };
+}
+```
+
+---
+
+### 5. Contract (`Bookings/Contracts/IBookingAppService.cs`)
+
+```csharp
+namespace HomeMaintenance.Application.Bookings.Contracts;
+
+using HomeMaintenance.Application.Bookings.Dtos;
+using HomeMaintenance.Core.Results;
+
+public interface IBookingAppService
+{
+    Task<Result<BookingDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
+    Task<Result<IReadOnlyList<BookingDto>>> GetCustomerBookingsAsync(Guid customerId, CancellationToken cancellationToken = default);
+
+    // Lifecycle Workflows
+    Task<Result<BookingDto>> CreateBookingAsync(CreateBookingRequestDto input, CancellationToken cancellationToken = default);
+    Task<Result<BookingDto>> AcceptAssignmentAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default);
+    Task<Result<BookingDto>> RejectAssignmentAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default);
+    Task<Result<BookingDto>> StartBookingAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default);
+    Task<Result<BookingDto>> CompleteBookingAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default);
+    Task<Result<BookingDto>> CancelBookingAsync(Guid bookingId, CancelBookingRequestDto input, bool isAdmin = false, CancellationToken cancellationToken = default);
+    Task<Result<BookingDto>> RescheduleBookingAsync(Guid bookingId, RescheduleBookingRequestDto input, CancellationToken cancellationToken = default);
+}
+```
+
+---
+
+### 6. Service Implementation (`Bookings/Services/BookingAppService.cs`)
+
+Here is where all the workflows are executed:
+
+```csharp
+namespace HomeMaintenance.Application.Bookings.Services;
+
+using FluentValidation;
+using HomeMaintenance.Application.Bookings.Contracts;
+using HomeMaintenance.Application.Bookings.Dtos;
+using HomeMaintenance.Application.Bookings.Mapping;
+using HomeMaintenance.Application.Common.Extensions;
+using HomeMaintenance.Core.Results;
+using HomeMaintenance.Domain.Common;
+using HomeMaintenance.Domain.Entities;
+using HomeMaintenance.Domain.Enums;
+using HomeMaintenance.Domain.Repositories;
+
+public class BookingAppService : IBookingAppService
+{
+    private readonly IBookingRepository _bookingRepository;
+    private readonly IServiceRepository _serviceRepository;
+    private readonly ICustomerRepository _customerRepository;
+    private readonly ITechnicianAssignmentEngine _assignmentEngine;
+    private readonly IUnitOfWork _unitOfWork;
+    private readonly IValidator<CreateBookingRequestDto> _createValidator;
+    private readonly IValidator<CancelBookingRequestDto> _cancelValidator;
+    private readonly IValidator<RescheduleBookingRequestDto> _rescheduleValidator;
+
+    public BookingAppService(
+        IBookingRepository bookingRepository,
+        IServiceRepository serviceRepository,
+        ICustomerRepository customerRepository,
+        ITechnicianAssignmentEngine assignmentEngine,
+        IUnitOfWork unitOfWork,
+        IValidator<CreateBookingRequestDto> createValidator,
+        IValidator<CancelBookingRequestDto> cancelValidator,
+        IValidator<RescheduleBookingRequestDto> rescheduleValidator)
+    {
+        _bookingRepository = bookingRepository;
+        _serviceRepository = serviceRepository;
+        _customerRepository = customerRepository;
+        _assignmentEngine = assignmentEngine;
+        _unitOfWork = unitOfWork;
+        _createValidator = createValidator;
+        _cancelValidator = cancelValidator;
+        _rescheduleValidator = rescheduleValidator;
+    }
+
+    public async Task<Result<BookingDto>> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+    {
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(id, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", $"Booking with ID '{id}' was not found.");
+
+        return booking.ToDto();
+    }
+
+    public async Task<Result<IReadOnlyList<BookingDto>>> GetCustomerBookingsAsync(Guid customerId, CancellationToken cancellationToken = default)
+    {
+        var bookings = await _bookingRepository.GetCustomerBookingsAsync(customerId, cancellationToken);
+        return bookings.Select(b => b.ToDto()).ToList();
+    }
+
+    // =========================================================================
+    // 1. Create Booking (Case 01 & Case 05)
+    // =========================================================================
+    public async Task<Result<BookingDto>> CreateBookingAsync(CreateBookingRequestDto input, CancellationToken cancellationToken = default)
+    {
+        // 1. Validate Input
+        var validationResult = await _createValidator.ValidateAsync(input, cancellationToken);
+        if (!validationResult.IsValid)
+            return Error.Validation("Booking.ValidationFailed", "Validation failed.", validationResult.ToDictionary());
+
+        // 2. Validate Customer exists
+        var customer = await _customerRepository.GetByIdAsync(input.CustomerId, cancellationToken);
+        if (customer is null)
+            return Error.NotFound("Customer.NotFound", "Customer does not exist.");
+
+        // 3. Validate Service is active & calculate EndTime
+        var service = await _serviceRepository.GetByIdAsync(input.ServiceId, cancellationToken);
+        if (service is null || !service.IsActive)
+            return Error.NotFound("Service.InactiveOrNotFound", "Selected service is unavailable.");
+
+        var endTimeUtc = input.StartTimeUtc.AddMinutes(service.DurationInMinutes);
+
+        // 4. Find eligible technician (Random strategy)
+        var assignmentResult = await _assignmentEngine.SelectTechnicianAsync(
+            input.ServiceId,
+            input.ServiceAreaId,
+            input.StartTimeUtc,
+            endTimeUtc,
+            null,
+            cancellationToken);
+
+        if (assignmentResult.IsFailure)
+            return assignmentResult.Error;
+
+        var technician = assignmentResult.Value;
+
+        // 5. Create Booking, Initial Assignment, and Audit History
+        var booking = new Booking
+        {
+            CustomerId = input.CustomerId,
+            ServiceId = input.ServiceId,
+            StartTimeUtc = input.StartTimeUtc,
+            EndTimeUtc = endTimeUtc,
+            Status = BookingStatus.Pending,
+            Location = input.Location // Frozen snapshot of location!
+        };
+
+        booking.BookingAssignments.Add(new BookingAssignment
+        {
+            BookingId = booking.Id,
+            TechnicianId = technician.Id,
+            Status = AssignmentStatus.Pending,
+            AssignedAtUtc = DateTime.UtcNow
+        });
+
+        booking.BookingStatusHistories.Add(new BookingStatusHistory
+        {
+            BookingId = booking.Id,
+            Status = BookingStatus.Pending,
+            ChangedAtUtc = DateTime.UtcNow,
+            Reason = $"Booking created. Dispatched to technician '{technician.Name}'."
+        });
+
+        await _bookingRepository.AddAsync(booking, cancellationToken);
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+
+        return await GetByIdAsync(booking.Id, cancellationToken);
+    }
+
+    // =========================================================================
+    // 2. Technician Accepts (Case 01)
+    // =========================================================================
+    public async Task<Result<BookingDto>> AcceptAssignmentAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default)
+    {
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(bookingId, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", "Booking not found.");
+
+        if (booking.Status != BookingStatus.Pending)
+            return Error.Conflict("Booking.InvalidStatus", $"Only pending bookings can be confirmed. Current status: '{booking.Status}'.");
+
+        var assignment = booking.BookingAssignments.FirstOrDefault(ba => ba.TechnicianId == technicianId && ba.Status == AssignmentStatus.Pending);
+        if (assignment is null)
+            return Error.NotFound("Assignment.NotFound", "No pending assignment found for this technician on this booking.");
+
+        // Update Assignment
+        assignment.Status = AssignmentStatus.Accepted;
+        assignment.RespondedAtUtc = DateTime.UtcNow;
+        assignment.UpdatedAtUtc = DateTime.UtcNow;
+
+        // Update Booking
+        booking.Status = BookingStatus.Confirmed;
+        booking.UpdatedAtUtc = DateTime.UtcNow;
+
+        // Audit Trail
+        booking.BookingStatusHistories.Add(new BookingStatusHistory
+        {
+            BookingId = booking.Id,
+            Status = BookingStatus.Confirmed,
+            ChangedAtUtc = DateTime.UtcNow,
+            Reason = "Technician accepted assignment."
+        });
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return booking.ToDto();
+    }
+
+    // =========================================================================
+    // 3. Technician Rejects & Reassignment Loop (Case 02 & Case 03)
+    // =========================================================================
+    public async Task<Result<BookingDto>> RejectAssignmentAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default)
+    {
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(bookingId, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", "Booking not found.");
+
+        if (booking.Status != BookingStatus.Pending)
+            return Error.Conflict("Booking.InvalidStatus", "Cannot reject an assignment for a non-pending booking.");
+
+        var assignment = booking.BookingAssignments.FirstOrDefault(ba => ba.TechnicianId == technicianId && ba.Status == AssignmentStatus.Pending);
+        if (assignment is null)
+            return Error.NotFound("Assignment.NotFound", "No pending assignment found for this technician.");
+
+        // 1. Mark current assignment as Rejected
+        assignment.Status = AssignmentStatus.Rejected;
+        assignment.RespondedAtUtc = DateTime.UtcNow;
+        assignment.UpdatedAtUtc = DateTime.UtcNow;
+
+        // 2. Search for the NEXT eligible technician (excluding technicians who already rejected this booking)
+        var nextTechResult = await _assignmentEngine.SelectTechnicianAsync(
+            booking.ServiceId,
+            assignment.Technician.TechnicianServiceAreas.FirstOrDefault()?.ServiceAreaId ?? Guid.Empty,
+            booking.StartTimeUtc,
+            booking.EndTimeUtc,
+            booking.Id, // Guarantees excluded technicians cannot be picked again!
+            cancellationToken);
+
+        if (nextTechResult.IsSuccess)
+        {
+            // Case 02: Next technician found!
+            var nextTech = nextTechResult.Value;
+
+            booking.BookingAssignments.Add(new BookingAssignment
+            {
+                BookingId = booking.Id,
+                TechnicianId = nextTech.Id,
+                Status = AssignmentStatus.Pending,
+                AssignedAtUtc = DateTime.UtcNow
+            });
+
+            booking.BookingStatusHistories.Add(new BookingStatusHistory
+            {
+                BookingId = booking.Id,
+                Status = BookingStatus.Pending,
+                ChangedAtUtc = DateTime.UtcNow,
+                Reason = $"Technician rejected. Reassigned to '{nextTech.Name}'."
+            });
+        }
+        else
+        {
+            // Case 03: All technicians rejected -> Cancel booking
+            booking.Status = BookingStatus.Cancelled;
+            booking.CancellationReason = "NoTechnicianAvailable";
+            booking.UpdatedAtUtc = DateTime.UtcNow;
+
+            booking.BookingStatusHistories.Add(new BookingStatusHistory
+            {
+                BookingId = booking.Id,
+                Status = BookingStatus.Cancelled,
+                ChangedAtUtc = DateTime.UtcNow,
+                Reason = "Booking cancelled automatically: all eligible technicians rejected or none available."
+            });
+        }
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return booking.ToDto();
+    }
+
+    // =========================================================================
+    // 4. Start Booking
+    // =========================================================================
+    public async Task<Result<BookingDto>> StartBookingAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default)
+    {
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(bookingId, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", "Booking not found.");
+
+        if (booking.Status != BookingStatus.Confirmed)
+            return Error.Conflict("Booking.InvalidStatus", $"Only Confirmed bookings can move to InProgress. Current status: '{booking.Status}'.");
+
+        var acceptedAssignment = booking.BookingAssignments.FirstOrDefault(ba => ba.TechnicianId == technicianId && ba.Status == AssignmentStatus.Accepted);
+        if (acceptedAssignment is null)
+            return Error.Forbidden("Technician.NotAssigned", "You are not the confirmed technician for this booking.");
+
+        booking.Status = BookingStatus.InProgress;
+        booking.UpdatedAtUtc = DateTime.UtcNow;
+
+        booking.BookingStatusHistories.Add(new BookingStatusHistory
+        {
+            BookingId = booking.Id,
+            Status = BookingStatus.InProgress,
+            ChangedAtUtc = DateTime.UtcNow,
+            Reason = "Technician started service."
+        });
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return booking.ToDto();
+    }
+
+    // =========================================================================
+    // 5. Complete Booking
+    // =========================================================================
+    public async Task<Result<BookingDto>> CompleteBookingAsync(Guid bookingId, Guid technicianId, CancellationToken cancellationToken = default)
+    {
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(bookingId, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", "Booking not found.");
+
+        if (booking.Status != BookingStatus.InProgress)
+            return Error.Conflict("Booking.InvalidStatus", $"Only InProgress bookings can be marked Completed. Current status: '{booking.Status}'.");
+
+        var acceptedAssignment = booking.BookingAssignments.FirstOrDefault(ba => ba.TechnicianId == technicianId && ba.Status == AssignmentStatus.Accepted);
+        if (acceptedAssignment is null)
+            return Error.Forbidden("Technician.NotAssigned", "You are not the confirmed technician for this booking.");
+
+        booking.Status = BookingStatus.Completed;
+        booking.UpdatedAtUtc = DateTime.UtcNow;
+
+        booking.BookingStatusHistories.Add(new BookingStatusHistory
+        {
+            BookingId = booking.Id,
+            Status = BookingStatus.Completed,
+            ChangedAtUtc = DateTime.UtcNow,
+            Reason = "Technician completed service."
+        });
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return booking.ToDto();
+    }
+
+    // =========================================================================
+    // 6. Cancel Booking (24-Hour Policy)
+    // =========================================================================
+    public async Task<Result<BookingDto>> CancelBookingAsync(Guid bookingId, CancelBookingRequestDto input, bool isAdmin = false, CancellationToken cancellationToken = default)
+    {
+        var validationResult = await _cancelValidator.ValidateAsync(input, cancellationToken);
+        if (!validationResult.IsValid)
+            return Error.Validation("Booking.ValidationFailed", "Validation failed.", validationResult.ToDictionary());
+
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(bookingId, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", "Booking not found.");
+
+        if (booking.Status == BookingStatus.Completed)
+            return Error.Conflict("Booking.Completed", "A completed booking cannot be cancelled.");
+
+        if (booking.Status == BookingStatus.Cancelled)
+            return Error.Conflict("Booking.AlreadyCancelled", "The booking is already cancelled.");
+
+        if (booking.Status == BookingStatus.InProgress && !isAdmin)
+            return Error.Conflict("Booking.InProgress", "An in-progress booking cannot be cancelled by the customer.");
+
+        // Rule 50 & 51: 24-hour cancellation rule for customers
+        if (!isAdmin && DateTime.UtcNow > booking.StartTimeUtc.AddHours(-24))
+        {
+            return Error.Conflict(
+                "Booking.CancellationPolicyViolation",
+                "Bookings can only be cancelled at least 24 hours prior to the scheduled start time.");
+        }
+
+        booking.Status = BookingStatus.Cancelled;
+        booking.CancellationReason = input.Reason;
+        booking.UpdatedAtUtc = DateTime.UtcNow;
+
+        booking.BookingStatusHistories.Add(new BookingStatusHistory
+        {
+            BookingId = booking.Id,
+            Status = BookingStatus.Cancelled,
+            ChangedAtUtc = DateTime.UtcNow,
+            Reason = $"Booking cancelled. Reason: {input.Reason} (Cancelled by {(isAdmin ? "Admin" : "Customer")})."
+        });
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return booking.ToDto();
+    }
+
+    // =========================================================================
+    // 7. Reschedule Booking
+    // =========================================================================
+    public async Task<Result<BookingDto>> RescheduleBookingAsync(Guid bookingId, RescheduleBookingRequestDto input, CancellationToken cancellationToken = default)
+    {
+        var validationResult = await _rescheduleValidator.ValidateAsync(input, cancellationToken);
+        if (!validationResult.IsValid)
+            return Error.Validation("Booking.ValidationFailed", "Validation failed.", validationResult.ToDictionary());
+
+        var booking = await _bookingRepository.GetByIdWithDetailsAsync(bookingId, cancellationToken);
+        if (booking is null)
+            return Error.NotFound("Booking.NotFound", "Booking not found.");
+
+        if (booking.Status == BookingStatus.Completed || booking.Status == BookingStatus.Cancelled || booking.Status == BookingStatus.InProgress)
+            return Error.Conflict("Booking.CannotReschedule", $"Cannot reschedule a booking with status '{booking.Status}'.");
+
+        var service = await _serviceRepository.GetByIdAsync(booking.ServiceId, cancellationToken);
+        if (service is null)
+            return Error.NotFound("Service.NotFound", "Service not found.");
+
+        var newEndTimeUtc = input.NewStartTimeUtc.AddMinutes(service.DurationInMinutes);
+
+        // Check availability for the new time
+        var assignmentResult = await _assignmentEngine.SelectTechnicianAsync(
+            booking.ServiceId,
+            input.ServiceAreaId,
+            input.NewStartTimeUtc,
+            newEndTimeUtc,
+            booking.Id,
+            cancellationToken);
+
+        if (assignmentResult.IsFailure)
+            return assignmentResult.Error;
+
+        var technician = assignmentResult.Value;
+
+        // Update schedule & create fresh assignment
+        booking.StartTimeUtc = input.NewStartTimeUtc;
+        booking.EndTimeUtc = newEndTimeUtc;
+        booking.Status = BookingStatus.Pending; // Moves back to pending awaiting the new tech's confirmation
+        booking.UpdatedAtUtc = DateTime.UtcNow;
+
+        booking.BookingAssignments.Add(new BookingAssignment
+        {
+            BookingId = booking.Id,
+            TechnicianId = technician.Id,
+            Status = AssignmentStatus.Pending,
+            AssignedAtUtc = DateTime.UtcNow
+        });
+
+        booking.BookingStatusHistories.Add(new BookingStatusHistory
+        {
+            BookingId = booking.Id,
+            Status = BookingStatus.Pending,
+            ChangedAtUtc = DateTime.UtcNow,
+            Reason = $"Rescheduled to {input.NewStartTimeUtc:u}. Reassigned to '{technician.Name}'."
+        });
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
+        return booking.ToDto();
+    }
+}
+```
+
+---
+
+### Notice the Craftsmanship:
+1. **Case 01, 02, 03 handled effortlessly**: The rejection reassignment loop automatically re-queries the database excluding rejected technicians. If none remain, it auto-cancels with `NoTechnicianAvailable`.
+2. **Rule 24, 50, 51 enforced**: Start time in the future, 24-hour cancellation rule.
+3. **Audit History preserved**: Every action logs an immutable `BookingStatusHistory`.
+4. **Frozen location snapshot**: `Booking.Location` is saved permanently at creation time.
+
+Shall we implement these files into `HomeMaintenance.Application` and compile?
