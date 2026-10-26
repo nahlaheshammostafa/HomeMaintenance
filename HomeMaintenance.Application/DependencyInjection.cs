@@ -1,6 +1,8 @@
 namespace HomeMaintenance.Application;
 
 using FluentValidation;
+using HomeMaintenance.Application.Authentication.Contracts;
+using HomeMaintenance.Application.Authentication.Services;
 using HomeMaintenance.Application.Customers.Contracts;
 using HomeMaintenance.Application.Customers.Services;
 using HomeMaintenance.Application.ServiceAreas.Contracts;
@@ -27,6 +29,12 @@ public static class DependencyInjection
         services.AddScoped<ITechnicianAppService, TechnicianAppService>();
         services.AddScoped<ITechnicianAssignmentEngine, TechnicianAssignmentEngine>();
         services.AddScoped<IBookingAppService, BookingAppService>();
+
+        // Register Authentication & Identity Services
+        services.AddHttpContextAccessor();
+        services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
+        services.AddScoped<ICurrentUserService, CurrentUserService>();
+        services.AddScoped<IAuthAppService, AuthAppService>();
 
         return services;
     }

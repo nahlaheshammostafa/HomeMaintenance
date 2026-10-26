@@ -1,4 +1,4 @@
-﻿namespace HomeMaintenance.Infrastructure.Repositories;
+namespace HomeMaintenance.Infrastructure.Repositories;
 
 using HomeMaintenance.Domain.Entities;
 using HomeMaintenance.Domain.Enums;
@@ -10,6 +10,18 @@ public class TechnicianRepository : Repository<Technician>, ITechnicianRepositor
 {
     public TechnicianRepository(ApplicationDbContext dbContext) : base(dbContext)
     {
+    }
+
+    public override async Task<IReadOnlyList<Technician>> GetAllAsync(CancellationToken cancellationToken = default)
+    {
+        return await DbSet
+            .Include(t => t.TechnicianServices)
+                .ThenInclude(ts => ts.Service)
+            .Include(t => t.TechnicianServiceAreas)
+                .ThenInclude(tsa => tsa.ServiceArea)
+            .Include(t => t.WorkingHours)
+            .Include(t => t.UnavailablePeriods)
+            .ToListAsync(cancellationToken);
     }
 
     public async Task<Technician?> GetByIdWithDetailsAsync(Guid id, CancellationToken cancellationToken = default)

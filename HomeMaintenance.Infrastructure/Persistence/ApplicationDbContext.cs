@@ -1,13 +1,17 @@
 namespace HomeMaintenance.Infrastructure.Persistence;
 
 using HomeMaintenance.Domain.Entities;
+using HomeMaintenance.Domain.Entities.Identity;
+using HomeMaintenance.Core.Common;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
 /// <summary>
 /// EF Core database context for the Home Maintenance platform.
 /// Automatically scans and applies entity type configurations from this assembly.
 /// </summary>
-public class ApplicationDbContext : DbContext
+public class ApplicationDbContext : IdentityDbContext<ApplicationUser, IdentityRole<Guid>, Guid>
 {
     public ApplicationDbContext(DbContextOptions<ApplicationDbContext> options)
         : base(options)
@@ -33,16 +37,17 @@ public class ApplicationDbContext : DbContext
         // Discovers and applies all IEntityTypeConfiguration<T> in this assembly
         modelBuilder.ApplyConfigurationsFromAssembly(typeof(ApplicationDbContext).Assembly);
 
-        // Ensure all entities with Guid primary keys are treated as ValueGenerated.OnAdd so that
-        // child entities added to navigation collections with pre-generated GUIDs are recognized
+        // Ensure all BaseEntity domain entities with Guid primary keys are treated as ValueGenerated.OnAdd
+        // so that child entities added to navigation collections with pre-generated GUIDs are recognized
         // by the change tracker as Added (INSERT) instead of Modified (UPDATE).
         foreach (var entityType in modelBuilder.Model.GetEntityTypes())
         {
-            var primaryKey = entityType.FindPrimaryKey();
-            if (primaryKey != null)
+            if (typeof(BaseEntity).IsAssignableFrom(entityType.ClrType))
             {
-                foreach (var property in primaryKey.Properties)
+                var primaryKey = entityType.FindPrimaryKey();
+                if (primaryKey != null && primaryKey.Properties.Count == 1)
                 {
+                    var property = primaryKey.Properties[0];
                     if (property.ClrType == typeof(Guid))
                     {
                         property.ValueGenerated = Microsoft.EntityFrameworkCore.Metadata.ValueGenerated.OnAdd;

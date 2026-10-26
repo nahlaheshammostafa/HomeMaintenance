@@ -16,12 +16,18 @@ public class ServiceAreasController : ApiController
     }
 
     /// <summary>
-    /// Retrieves all service coverage areas (e.g., Cairo, Giza, Alexandria).
+    /// Retrieves service coverage areas, optionally filtered by the service they offer.
     /// </summary>
     [HttpGet]
     [ProducesResponseType(typeof(IReadOnlyList<ServiceAreaDto>), StatusCodes.Status200OK)]
-    public async Task<IActionResult> GetAll(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetAll([FromQuery] Guid? serviceId, CancellationToken cancellationToken)
     {
+        if (serviceId.HasValue)
+        {
+            var byServiceResult = await _serviceAreaAppService.GetByServiceIdAsync(serviceId.Value, cancellationToken);
+            return HandleResult(byServiceResult);
+        }
+
         var result = await _serviceAreaAppService.GetAllAsync(cancellationToken);
         return HandleResult(result);
     }

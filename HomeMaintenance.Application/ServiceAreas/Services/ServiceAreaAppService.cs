@@ -40,6 +40,12 @@ public class ServiceAreaAppService : IServiceAreaAppService
         return areas.Select(a => a.ToDto()).ToList();
     }
 
+    public async Task<Result<IReadOnlyList<ServiceAreaDto>>> GetByServiceIdAsync(Guid serviceId, CancellationToken cancellationToken = default)
+    {
+        var areas = await _serviceAreaRepository.GetAreasByServiceIdAsync(serviceId, cancellationToken);
+        return areas.Select(a => a.ToDto()).ToList();
+    }
+
     public async Task<Result<ServiceAreaDto>> CreateAsync(CreateUpdateServiceAreaDto input, CancellationToken cancellationToken = default)
     {
         // 1. Validate
